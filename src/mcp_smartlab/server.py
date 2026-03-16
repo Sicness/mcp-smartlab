@@ -334,6 +334,12 @@ async def search_bonds(
             bonds = [b for b in bonds if b.get("yield_pct") is not None and b["yield_pct"] >= fetch_min_yield]
         if max_yield is not None:
             bonds = [b for b in bonds if b.get("yield_pct") is not None and b["yield_pct"] <= max_yield]
+        # Smartlab's duration_from/duration_to server-side filter is unreliable;
+        # apply client-side filtering on years_to_maturity.
+        if duration_from is not None:
+            bonds = [b for b in bonds if b.get("years_to_maturity") is not None and b["years_to_maturity"] >= duration_from]
+        if duration_to is not None:
+            bonds = [b for b in bonds if b.get("years_to_maturity") is not None and b["years_to_maturity"] <= duration_to]
 
         all_bonds.extend(bonds)
         # Smartlab hides pagination links when a rating filter is active,

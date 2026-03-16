@@ -336,6 +336,36 @@ async def test_search_bonds_ig_ignores_hidden_pagination(mock_fetch):
     assert mock_fetch.call_count >= 2
 
 
+async def test_search_bonds_duration_from_client_filter(mock_fetch):
+    """duration_from filters out bonds with years_to_maturity < threshold (server-side filter unreliable)."""
+    # Fixture has bonds with years_to_maturity: 2.5, 3.1, 1.5
+    mock_fetch.side_effect = [load_fixture("bonds_corporate.html"), load_fixture("bonds_empty.html")]
+    result = json.loads(await search_bonds(duration_from=2.0, limit=10))
+    # Only bonds with years_to_maturity >= 2.0 should pass: 2.5 and 3.1
+    assert all(b["years_to_maturity"] >= 2.0 for b in result)
+    assert len(result) == 2
+
+
+async def test_search_bonds_duration_to_client_filter(mock_fetch):
+    """duration_to filters out bonds with years_to_maturity > threshold."""
+    # Fixture has bonds with years_to_maturity: 2.5, 3.1, 1.5
+    mock_fetch.side_effect = [load_fixture("bonds_corporate.html"), load_fixture("bonds_empty.html")]
+    result = json.loads(await search_bonds(duration_to=2.5, limit=10))
+    # Only bonds with years_to_maturity <= 2.5 should pass: 2.5 and 1.5
+    assert all(b["years_to_maturity"] <= 2.5 for b in result)
+    assert len(result) == 2
+
+
+async def test_search_bonds_duration_range_client_filter(mock_fetch):
+    """Both duration_from and duration_to applied client-side."""
+    # Fixture has bonds with years_to_maturity: 2.5, 3.1, 1.5
+    mock_fetch.side_effect = [load_fixture("bonds_corporate.html"), load_fixture("bonds_empty.html")]
+    result = json.loads(await search_bonds(duration_from=2.0, duration_to=3.0, limit=10))
+    # Only 2.5 falls in [2.0, 3.0]
+    assert len(result) == 1
+    assert result[0]["years_to_maturity"] == 2.5
+
+
 async def test_get_bond_details_found(mock_fetch):
     mock_fetch.return_value = load_fixture("bond_detail.html")
     result = json.loads(await get_bond_details("RU000A106540"))
