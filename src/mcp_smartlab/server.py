@@ -135,6 +135,33 @@ FUNDAMENTAL_SORT_MAP = {
     "debt_ebitda": "order_by_debt_ebitda",
 }
 
+# Rating hierarchy: index 0 = highest quality. Used for client-side filtering
+# because smart-lab.ru's server-side rating filter is unreliable.
+RATING_ORDER = [
+    "AAA", "AA+", "AA", "AA-",
+    "A+", "A", "A-",
+    "BBB+", "BBB", "BBB-",
+    "BB+", "BB", "BB-",
+    "B+", "B", "B-",
+    "CCC+", "CCC", "CCC-",
+    "CC", "C", "D",
+]
+_RATING_RANK = {r: i for i, r in enumerate(RATING_ORDER)}
+
+
+def _rating_meets_minimum(bond_rating: str | None, min_rating: str) -> bool:
+    """Return True if bond_rating is at or above min_rating in credit quality."""
+    if not bond_rating:
+        return False
+    min_rank = _RATING_RANK.get(min_rating)
+    if min_rank is None:
+        return True  # unknown min_rating — don't filter
+    bond_rank = _RATING_RANK.get(bond_rating)
+    if bond_rank is None:
+        return False  # unknown bond rating — exclude
+    return bond_rank <= min_rank
+
+
 BOND_SECTORS = {
     "bank": "Банки",
     "oil": "Нефть и газ",
@@ -268,24 +295,28 @@ async def search_bonds(
 
     all_bonds: list[dict] = []
     page = 1
-    while len(all_bonds) < limit:
+    max_pages = 10  # safety limit to avoid excessive requests
+    while len(all_bonds) < limit and page <= max_pages:
         url = _build_bonds_url(bond_type, sort_by, sort_order, page=page, **filters)
         cache_key = f"bonds:{url}"
         html = await _fetch(url, cache_key=cache_key, ttl=TTL_SCREENER)
         bonds = parser.parse_bonds_table(html)
         if not bonds:
             break
+
+        # Apply post-filters immediately so the loop fetches enough pages
+        if rating:
+            bonds = [b for b in bonds if _rating_meets_minimum(b.get("rating"), rating)]
+        if min_yield is not None:
+            bonds = [b for b in bonds if b.get("yield_pct") is not None and b["yield_pct"] >= min_yield]
+        if max_yield is not None:
+            bonds = [b for b in bonds if b.get("yield_pct") is not None and b["yield_pct"] <= max_yield]
+
         all_bonds.extend(bonds)
         total_pages = parser.parse_pagination(html)
         if page >= total_pages:
             break
         page += 1
-
-    # Post-filters
-    if min_yield is not None:
-        all_bonds = [b for b in all_bonds if b.get("yield_pct") is not None and b["yield_pct"] >= min_yield]
-    if max_yield is not None:
-        all_bonds = [b for b in all_bonds if b.get("yield_pct") is not None and b["yield_pct"] <= max_yield]
 
     return _fmt(all_bonds[:limit])
 
@@ -355,6 +386,10 @@ async def get_bond_chart_data(
 
     # Return "wc" (with coupon yield, duration) — most useful for investors
     items = chart_data.get("wc", [])
+
+    # Client-side rating filter
+    if rating:
+        items = [i for i in items if _rating_meets_minimum(i.get("rating"), rating)]
 
     # Sort by yield descending
     items.sort(key=lambda x: x.get("yield_pct") or 0, reverse=True)
