@@ -1,5 +1,7 @@
 # mcp-smartlab
 
+[![Tests](https://github.com/Sicness/mcp-smartlab/actions/workflows/tests.yml/badge.svg)](https://github.com/Sicness/mcp-smartlab/actions/workflows/tests.yml)
+
 MCP server for scraping financial data from [smart-lab.ru](https://smart-lab.ru) — a Russian financial portal.
 
 Provides bond screening with filters (rating, duration, sector, floater/fixed, amortization), stock screening with market data and fundamentals, and dividend calendar.
