@@ -80,10 +80,22 @@ def test_build_bonds_url_with_filters():
         "corporate", "yield", "desc",
         rating="A+", duration_from=1, duration_to=5, sector="bank",
     )
-    assert "rating=A+" in url
+    assert "rating=A%2B" in url
     assert "duration_from=1" in url
     assert "duration_to=5" in url
     assert "sector=bank" in url
+
+
+def test_build_bonds_url_rating_encoding():
+    """Rating values with + must be percent-encoded so the server receives the right value."""
+    assert "rating=A%2B" in _build_bonds_url("corporate", "yield", "desc", rating="A+")
+    assert "rating=BBB%2B" in _build_bonds_url("corporate", "yield", "desc", rating="BBB+")
+    assert "rating=AA%2B" in _build_bonds_url("corporate", "yield", "desc", rating="AA+")
+    # Ratings without + should pass through unchanged
+    assert "rating=AA-" in _build_bonds_url("corporate", "yield", "desc", rating="AA-")
+    assert "rating=AA" in _build_bonds_url("corporate", "yield", "desc", rating="AA")
+    assert "rating=BBB-" in _build_bonds_url("corporate", "yield", "desc", rating="BBB-")
+    assert "rating=AAA" in _build_bonds_url("corporate", "yield", "desc", rating="AAA")
 
 
 def test_build_bonds_url_amortization():
@@ -152,7 +164,8 @@ async def test_search_bonds_basic(mock_fetch):
 
 
 async def test_search_bonds_rating_filter(mock_fetch):
-    mock_fetch.return_value = load_fixture("bonds_corporate.html")
+    # IG mode ignores total_pages and paginates until empty page, so provide a stop.
+    mock_fetch.side_effect = [load_fixture("bonds_corporate.html"), load_fixture("bonds_empty.html")]
     result = json.loads(await search_bonds(rating="A+"))
     # Only AAA and AA+ should pass (BB+ excluded)
     ratings = [b["rating"] for b in result]
@@ -174,7 +187,7 @@ async def test_search_bonds_rating_filter(mock_fetch):
         ({"perpetual": "no"}, ["perpetual=0"]),
         ({"bond_type": "ofz"}, ["/q/ofz/"]),
         ({"sort_by": "duration", "sort_order": "asc"}, ["order_by_duration/asc/"]),
-        ({"rating": "A+"}, ["rating=A+"]),  # server-side param (also applied client-side)
+        ({"rating": "A+"}, ["rating=A%2B"]),  # + must be percent-encoded (server-side param)
     ],
 )
 async def test_search_bonds_passes_filter_to_url(mock_fetch, kwargs, expected_in_url):
@@ -203,7 +216,7 @@ async def test_search_bonds_all_filters_combined(mock_fetch):
     url = mock_fetch.call_args[0][0]
     assert url.startswith("/q/subfed/")
     assert "order_by_last/asc/" in url
-    assert "rating=BBB+" in url
+    assert "rating=BBB%2B" in url
     assert "duration_from=0.5" in url
     assert "duration_to=3" in url
     assert "sector=bank" in url
@@ -233,6 +246,62 @@ async def test_search_bonds_limit(mock_fetch):
     assert len(result) == 2
 
 
+async def test_search_bonds_ig_rating_uses_asc_sort_internally(mock_fetch):
+    """IG rating + sort_order='desc' → internal fetch uses ascending sort."""
+    mock_fetch.return_value = load_fixture("bonds_corporate.html")
+    await search_bonds(rating="A+", sort_by="yield", sort_order="desc")
+    url = mock_fetch.call_args_list[0][0][0]
+    assert "order_by_yield/asc/" in url
+
+
+async def test_search_bonds_non_ig_rating_keeps_desc_sort(mock_fetch):
+    """Non-IG rating search does NOT flip sort order."""
+    mock_fetch.return_value = load_fixture("bonds_corporate.html")
+    await search_bonds(rating="BB", sort_by="yield", sort_order="desc")
+    url = mock_fetch.call_args_list[0][0][0]
+    assert "order_by_yield/desc/" in url
+
+
+async def test_search_bonds_ig_explicit_asc_not_flipped(mock_fetch):
+    """When user explicitly requests asc sort, IG search doesn't flip it."""
+    mock_fetch.return_value = load_fixture("bonds_corporate.html")
+    await search_bonds(rating="A+", sort_by="yield", sort_order="asc")
+    url = mock_fetch.call_args_list[0][0][0]
+    assert "order_by_yield/asc/" in url
+
+
+async def test_search_bonds_ig_non_yield_sort_not_flipped(mock_fetch):
+    """IG search only flips when sort_by='yield'. Other fields → no flip."""
+    mock_fetch.return_value = load_fixture("bonds_corporate.html")
+    await search_bonds(rating="A+", sort_by="duration", sort_order="desc")
+    url = mock_fetch.call_args_list[0][0][0]
+    assert "order_by_duration/desc/" in url
+
+
+async def test_search_bonds_ig_excludes_zero_and_negative_yields(mock_fetch):
+    """IG search applies min_yield=1 automatically to skip structured products and no-data bonds."""
+    mock_fetch.return_value = load_fixture("bonds_corporate.html")
+    result = json.loads(await search_bonds(rating="A+", sort_by="yield", sort_order="desc"))
+    for b in result:
+        assert b["yield_pct"] >= 1.0
+
+
+async def test_search_bonds_ig_result_sorted_desc(mock_fetch):
+    """IG search returns result sorted by yield descending."""
+    mock_fetch.return_value = load_fixture("bonds_corporate.html")
+    result = json.loads(await search_bonds(rating="A+", sort_by="yield", sort_order="desc"))
+    yields = [b["yield_pct"] for b in result]
+    assert yields == sorted(yields, reverse=True)
+
+
+async def test_search_bonds_ig_respects_explicit_min_yield(mock_fetch):
+    """When user provides min_yield > 0 for IG search, it's preserved."""
+    mock_fetch.return_value = load_fixture("bonds_corporate.html")
+    result = json.loads(await search_bonds(rating="A+", sort_by="yield", sort_order="desc", min_yield=17.0))
+    for b in result:
+        assert b["yield_pct"] >= 17.0
+
+
 async def test_search_bonds_empty(mock_fetch):
     mock_fetch.return_value = load_fixture("bonds_empty.html")
     result = json.loads(await search_bonds())
@@ -240,7 +309,7 @@ async def test_search_bonds_empty(mock_fetch):
 
 
 async def test_search_bonds_pagination(mock_fetch):
-    """Different HTML per page, fetches multiple pages."""
+    """Non-IG search: fetches next page when pagination link is present."""
     page1 = load_fixture("bonds_corporate.html").replace(
         "</table>",
         '</table><a class="page" href="page2/">2</a>',
@@ -252,6 +321,19 @@ async def test_search_bonds_pagination(mock_fetch):
     # Should have results from both pages (3 + 3)
     assert len(result) == 6
     assert mock_fetch.call_count == 2
+
+
+async def test_search_bonds_ig_ignores_hidden_pagination(mock_fetch):
+    """IG search continues past pages that report total_pages=1 (Smartlab hides pagination with rating filter)."""
+    # Both pages report no pagination (total_pages=1), but IG mode should still fetch page 2
+    page1_no_yield = load_fixture("bonds_corporate.html").replace("18.34", "0.0").replace("16.72", "0.0").replace("22.10", "0.0")
+    page2_with_yield = load_fixture("bonds_corporate.html")  # has real yields + AAA/AA+ bonds
+
+    mock_fetch.side_effect = [page1_no_yield, page2_with_yield, load_fixture("bonds_empty.html")]
+    result = json.loads(await search_bonds(rating="A+", sort_by="yield", sort_order="desc", limit=5))
+    # Page 1 has 0-yield bonds (filtered), page 2 has real yields — should collect from page 2
+    assert len(result) == 2  # AAA and AA+ from page 2
+    assert mock_fetch.call_count >= 2
 
 
 async def test_get_bond_details_found(mock_fetch):
