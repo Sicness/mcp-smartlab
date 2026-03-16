@@ -6,6 +6,7 @@ import asyncio
 import json
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlencode
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -226,8 +227,7 @@ def _build_bonds_url(
         params["perpetual"] = "0"
 
     if params:
-        qs = "&".join(f"{k}={v}" for k, v in params.items())
-        path += f"?{qs}"
+        path += f"?{urlencode(params)}"
 
     return path
 
@@ -293,30 +293,62 @@ async def search_bonds(
         perpetual=perpetual,
     )
 
+    # When searching for investment-grade bonds (BBB+ and above) sorted by yield
+    # descending, Smartlab's server-side rating filter is unreliable.  IG bonds
+    # have lower yields than junk and appear on pages 17-22+ when sorted desc,
+    # far beyond the safe page limit.  Fix: internally flip to ascending sort so
+    # IG bonds appear on early pages (after negative-yield structured products),
+    # skip negative yields via min_yield ≥ 0, then re-sort descending.
+    _ig_cutoff_rank = _RATING_RANK.get("BBB+", 10)
+    _filter_rank = _RATING_RANK.get(rating) if rating else None
+    _is_ig_search = (
+        _filter_rank is not None
+        and _filter_rank <= _ig_cutoff_rank
+        and sort_by == "yield"
+        and sort_order == "desc"
+    )
+
+    fetch_sort_order = "asc" if _is_ig_search else sort_order
+    # Exclude negative-yield structured products and zero-yield (no-data) bonds
+    # when doing IG ascending sweep.  Real tradeable bonds always have yield > 0.
+    fetch_min_yield = max(min_yield if min_yield is not None else 1.0, 1.0) if _is_ig_search else min_yield
+    # IG search needs more pages: ~10 pages of zero-yield old bonds before real data starts.
+    # Smartlab also hides pagination links when a rating filter is active,
+    # so total_pages will appear as 1 even though more pages exist.
+    max_pages = 30 if _is_ig_search else 10
+
     all_bonds: list[dict] = []
     page = 1
-    max_pages = 10  # safety limit to avoid excessive requests
-    while len(all_bonds) < limit and page <= max_pages:
-        url = _build_bonds_url(bond_type, sort_by, sort_order, page=page, **filters)
+    while page <= max_pages:
+        url = _build_bonds_url(bond_type, sort_by, fetch_sort_order, page=page, **filters)
         cache_key = f"bonds:{url}"
         html = await _fetch(url, cache_key=cache_key, ttl=TTL_SCREENER)
         bonds = parser.parse_bonds_table(html)
         if not bonds:
             break
 
-        # Apply post-filters immediately so the loop fetches enough pages
+        # Apply post-filters
         if rating:
             bonds = [b for b in bonds if _rating_meets_minimum(b.get("rating"), rating)]
-        if min_yield is not None:
-            bonds = [b for b in bonds if b.get("yield_pct") is not None and b["yield_pct"] >= min_yield]
+        if fetch_min_yield is not None:
+            bonds = [b for b in bonds if b.get("yield_pct") is not None and b["yield_pct"] >= fetch_min_yield]
         if max_yield is not None:
             bonds = [b for b in bonds if b.get("yield_pct") is not None and b["yield_pct"] <= max_yield]
 
         all_bonds.extend(bonds)
-        total_pages = parser.parse_pagination(html)
-        if page >= total_pages:
-            break
+        # Smartlab hides pagination links when a rating filter is active,
+        # making total_pages appear as 1 even when more pages exist.
+        # For IG search, rely solely on max_pages + empty-page detection.
+        if not _is_ig_search:
+            total_pages = parser.parse_pagination(html)
+            if page >= total_pages:
+                break
+            if len(all_bonds) >= limit:
+                break
         page += 1
+
+    if _is_ig_search:
+        all_bonds.sort(key=lambda b: b.get("yield_pct") or 0, reverse=True)
 
     return _fmt(all_bonds[:limit])
 
