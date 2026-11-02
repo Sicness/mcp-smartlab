@@ -192,9 +192,15 @@ def parse_bond_detail(html: str) -> dict[str, Any]:
     """Parse bond detail page — coupon schedule table and page metadata."""
     result: dict[str, Any] = {}
 
+    soup = BeautifulSoup(html, "lxml")
+
     # Parse coupon schedule table
     # Columns: №, Дата купона, Купон руб, Дох. купона, % от номинала, % от рынка
-    table = _get_table(html)
+    # Pages of recent issues open with tables of issue documents ("Тип документа",
+    # programme, decision on the issue), so the schedule is picked by its "№"
+    # header cell rather than by position.
+    table = next((t for t in soup.find_all("table")
+                  if (first := t.find(["th", "td"])) and _clean(first.get_text()) == "№"), None)
     if table:
         rows = _table_rows(table)
         coupons = []
@@ -209,9 +215,6 @@ def parse_bond_detail(html: str) -> dict[str, Any]:
                 "pct_of_market": _parse_number(row[5].get_text()),
             })
         result["coupons"] = coupons
-
-    # Extract key-value pairs from the page (dl/dt/dd or similar structures)
-    soup = BeautifulSoup(html, "lxml")
 
     # Try to find bond info in the page title / header
     h1 = soup.find("h1")
