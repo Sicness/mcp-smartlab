@@ -214,6 +214,17 @@ def test_parse_bond_detail_with_coupons():
     assert c["coupon_yield_pct"] == 8.48
 
 
+def test_parse_bond_detail_skips_document_tables():
+    # Recent issues list programme/decision documents in tables above the schedule
+    html = load_fixture("bond_detail_with_documents.html")
+    detail = parse_bond_detail(html)
+    assert len(detail["coupons"]) == 2
+    c = detail["coupons"][0]
+    assert c["date"] == "24-04-2026"
+    assert c["coupon_rub"] == 49.86
+    assert c["coupon_yield_pct"] == 20.0
+
+
 def test_parse_bond_detail_no_table():
     html = "<html><body><h1>Some Bond</h1><p>No table here</p></body></html>"
     detail = parse_bond_detail(html)
